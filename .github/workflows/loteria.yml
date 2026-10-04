@@ -21,6 +21,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Ejecutar scraper
+      - name: Ejecutar scrapper
         run: |
-          python scraper.py
+          python scrapper.py
