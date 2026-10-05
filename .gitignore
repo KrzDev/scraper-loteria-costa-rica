@@ -1,4 +1,13 @@
+# Entorno virtual
 venv/
+.venv/
+
+# Caché de Python
 __pycache__/
 *.pyc
-.env
+
+# Archivos de prueba locales
+.github/workflows/loteria1.yml
+pruebaConexion.py
+scrapper1.py
+script.py

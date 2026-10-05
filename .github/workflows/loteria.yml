@@ -1,14 +1,22 @@
 name: Scraper de Lotería
 
 on:
+  # Disparado por el cron job externo (API de GitHub) o manualmente
   workflow_dispatch:
 
-  push:
-    branches:
-      - main
+  # Respaldo opcional: descomenta si quieres que GitHub también lo ejecute.
+  # (Cron en UTC: 18-23,0-3 = 12:00 a 21:59 hora Costa Rica.
+  #  La deduplicación evita publicar doble.)
+  # schedule:
+  #   - cron: "*/15 18-23,0-3 * * *"
 
-  schedule:
-    - cron: "*/5 * * * *"
+permissions:
+  contents: write
+
+# Evita que dos ejecuciones se pisen entre sí
+concurrency:
+  group: scraper-loteria
+  cancel-in-progress: false
 
 jobs:
   ejecutar-scraper:
@@ -29,5 +37,18 @@ jobs:
           pip install -r requirements.txt
 
       - name: Ejecutar scraper
+        env:
+          WHAPI_TOKEN: ${{ secrets.WHAPI_TOKEN }}
+          WHAPI_CHANNEL_ID: ${{ secrets.WHAPI_CHANNEL_ID }}
+        run: python scrapper.py
+
+      - name: Guardar estado
         run: |
-          python scrapper.py
+          if [[ -n "$(git status --porcelain ultimo_envio.json)" ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add ultimo_envio.json
+            git commit -m "Actualizar estado de envíos"
+            git pull --rebase origin main
+            git push
+          fi
