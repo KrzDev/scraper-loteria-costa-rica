@@ -1,5 +1,6 @@
 import os
 import json
+import unicodedata
 from datetime import datetime, timezone, timedelta
 
 import requests
@@ -260,13 +261,86 @@ MESES = [
 
 SEPARADOR = "━━━━━━━━━━━━━━━"
 
+# --------------------------------------------------
+# Banderas y nombres especiales
+# --------------------------------------------------
+# Se evalúa en orden: la primera regla que coincida gana.
+# Formato: (palabras_clave, bandera, nombre_alterno)
+#   - palabras_clave: se buscan dentro del nombre del sorteo
+#     (sin importar mayúsculas ni tildes).
+#   - bandera: emoji que se agrega al final del nombre.
+#   - nombre_alterno: si no es None, reemplaza el nombre completo.
+#
+# Si ningún sorteo coincide, se usa BANDERA_POR_DEFECTO.
+
+BANDERA_POR_DEFECTO = "🇨🇷"
+
+REGLAS_SORTEOS = [
+    (("MONAZO",), "", "🐒🐒🐒"),
+    (("NICA", "TRIPLETA"), "🇳🇮", None),
+    (("HONDURAS",), "🇭🇳", None),
+    (("SALVADOR",), "🇸🇻", None),
+    (("PANAMA",), "🇵🇦", None),
+    (("LEIDSA", "LOTEKA", "DOMINICAN"), "🇩🇴", None),
+    (("NEW YORK", "FLORIDA"), "🇺🇸", None),
+]
+
+# Resultados especiales de los Tiempos
+EMOJIS_ESPECIALES = {
+    "BR": "🔴",
+    "BB": "⚪",
+}
+
+
+def normalizar(texto):
+    """
+    Mayúsculas y sin tildes, para comparar nombres.
+    """
+
+    texto = unicodedata.normalize("NFD", texto)
+    texto = "".join(c for c in texto if unicodedata.category(c) != "Mn")
+
+    return texto.upper().strip()
+
+
+def nombre_con_bandera(nombre):
+    """
+    Devuelve el nombre del sorteo con su bandera al final.
+    Ejemplo: "Nica 3pm" -> "NICA 3PM🇳🇮"
+    """
+
+    clave = normalizar(nombre)
+
+    for palabras, bandera, alterno in REGLAS_SORTEOS:
+
+        if any(p in clave for p in palabras):
+
+            texto = alterno if alterno else clave
+            return f"{texto}{bandera}"
+
+    return f"{clave}{BANDERA_POR_DEFECTO}"
+
+
+def numero_a_emoji(numero):
+    """
+    Convierte "06" en 0️⃣6️⃣ (y BR/BB en 🔴/⚪).
+    """
+
+    especial = EMOJIS_ESPECIALES.get(numero.upper())
+
+    if especial:
+        return especial
+
+    # Cada dígito + selector de variación + marco de tecla
+    return "".join(
+        f"{d}\ufe0f\u20e3" if d.isdigit() else d
+        for d in numero
+    )
+
 
 def formatear_mensaje(resultados):
     """
-    Arma el texto que se publica en el canal.
-
-    WhatsApp soporta:
-      *negrita*   _cursiva_   `monoespaciado`
+    Arma el texto que se publica en el canal / grupo.
     """
 
     ahora = datetime.now(TZ_CR)
@@ -284,52 +358,66 @@ def formatear_mensaje(resultados):
     ]
 
     for r in resultados:
-        numeros = "   ".join(f"`{n}`" for n in r["numeros"])
 
-        lineas.append(f"🎟️ *{r['nombre']}*")
-        lineas.append(f"🔢 {numeros}")
+        numeros = "".join(numero_a_emoji(n) for n in r["numeros"])
+
+        # Los asteriscos ponen el nombre en negrita en WhatsApp
+        lineas.append(f"*{nombre_con_bandera(r['nombre'])}*")
+        lineas.append(numeros)
         lineas.append("")
 
     lineas.append(SEPARADOR)
-    lineas.append("_Juega con responsabilidad_ 🍀")
 
     return "\n".join(lineas)
 
 
 def enviar_whatsapp(mensaje):
     """
-    Publica un mensaje en el canal de WhatsApp
-    usando Whapi.Cloud.
+    Publica el mensaje en uno o varios destinos
+    (canal @newsletter y/o grupo @g.us) usando Whapi.Cloud.
+
+    WHAPI_CHANNEL_ID puede tener varios IDs separados por coma:
+    120363XXXX@newsletter,120363YYYY@g.us
     """
 
     token = os.environ.get("WHAPI_TOKEN")
-    canal_id = os.environ.get("WHAPI_CHANNEL_ID")
+    destinos = os.environ.get("WHAPI_CHANNEL_ID", "")
 
-    if not token or not canal_id:
+    if not token or not destinos:
         print("Faltan WHAPI_TOKEN o WHAPI_CHANNEL_ID")
         return False
 
-    try:
-        response = requests.post(
-            WHAPI_URL,
-            headers={"Authorization": f"Bearer {token}"},
-            json={"to": canal_id, "body": mensaje},
-            timeout=20,
-        )
+    algun_exito = False
 
-        response.raise_for_status()
+    for destino in destinos.split(","):
 
-        print("Mensaje enviado")
-        return True
+        destino = destino.strip()
 
-    except requests.RequestException as error:
-        detalle = ""
+        if not destino:
+            continue
 
-        if getattr(error, "response", None) is not None:
-            detalle = error.response.text
+        try:
+            response = requests.post(
+                WHAPI_URL,
+                headers={"Authorization": f"Bearer {token}"},
+                json={"to": destino, "body": mensaje},
+                timeout=20,
+            )
 
-        print(f"Error al enviar: {error} {detalle}")
-        return False
+            response.raise_for_status()
+
+            print(f"Mensaje enviado a {destino}")
+            algun_exito = True
+
+        except requests.RequestException as error:
+            detalle = ""
+
+            if getattr(error, "response", None) is not None:
+                detalle = error.response.text
+
+            print(f"Error al enviar a {destino}: {error} {detalle}")
+
+    return algun_exito
 
 
 # ======================================================
