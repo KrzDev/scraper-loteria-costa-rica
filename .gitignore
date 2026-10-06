@@ -10,5 +10,7 @@ __pycache__/
 .github/workflows/loteria1.yml
 pruebaConexion.py
 scrapper1.py
+scrapper2.py
 script.py
 script2.py
+script3.py

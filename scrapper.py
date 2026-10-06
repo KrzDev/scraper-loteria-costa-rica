@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import unicodedata
 from datetime import datetime, timezone, timedelta
@@ -11,6 +12,16 @@ URL = "https://loteriascostarica.com/"
 
 WHAPI_URL = "https://gate.whapi.cloud/messages/text"
 ARCHIVO_ESTADO = "ultimo_envio.json"
+
+# Canales de WhatsApp de los que se leen resultados.
+# (el número conectado a Whapi debe seguir estos canales)
+CANALES_ORIGEN = [
+    "120363401872583659@newsletter",  # RESULTADOS - INFO & MAS
+    "120363428516815284@newsletter",  # GRUPO MYS
+]
+
+# Cuántos mensajes recientes se piden a cada canal
+MENSAJES_POR_CANAL = 20
 
 # Costa Rica es UTC-6 (sin horario de verano)
 TZ_CR = timezone(timedelta(hours=-6))
@@ -271,9 +282,10 @@ SEPARADOR = "━━━━━━━━━━━━━━━"
 #   - bandera: emoji que se agrega al final del nombre.
 #   - nombre_alterno: si no es None, reemplaza el nombre completo.
 #
-# Si ningún sorteo coincide, se usa BANDERA_POR_DEFECTO.
+# Si ningún sorteo coincide con una regla, NO se agrega bandera
+# (BANDERA_POR_DEFECTO vacío).
 
-BANDERA_POR_DEFECTO = "🇨🇷"
+BANDERA_POR_DEFECTO = ""
 
 REGLAS_SORTEOS = [
     (("MONAZO",), "", "🐒🐒🐒"),
@@ -281,8 +293,11 @@ REGLAS_SORTEOS = [
     (("HONDURAS",), "🇭🇳", None),
     (("SALVADOR",), "🇸🇻", None),
     (("PANAMA",), "🇵🇦", None),
-    (("LEIDSA", "LOTEKA", "DOMINICAN"), "🇩🇴", None),
-    (("NEW YORK", "FLORIDA"), "🇺🇸", None),
+    (("DOMI", "PRIMERA", "SUERTE", "REAL", "LEIDSA", "LOTEKA"), "🇩🇴", None),
+    (("ANGUILA",), "🇦🇮", None),
+    (("NEW YORK", "FLORIDA", "KING"), "🇺🇸", None),
+    (("PAPA CALIENTE", "DIGITAL", "TICAS", "REVENTADO",
+      "TIEMPOS", "NACIONAL", "POPULAR"), "🇨🇷", None),
 ]
 
 # Resultados especiales de los Tiempos
@@ -303,22 +318,29 @@ def normalizar(texto):
     return texto.upper().strip()
 
 
-def nombre_con_bandera(nombre):
+def nombre_con_bandera(nombre, bandera=None):
     """
     Devuelve el nombre del sorteo con su bandera al final.
     Ejemplo: "Nica 3pm" -> "NICA 3PM🇳🇮"
+
+    Si el resultado viene de un canal, "bandera" es la que
+    trae el mensaje original (tiene prioridad sobre las reglas,
+    salvo en los nombres alternos como los Monazos).
     """
 
-    clave = normalizar(nombre)
+    clave = normalizar(nombre)       # para comparar (sin tildes)
+    visible = nombre.strip().upper() # para mostrar (conserva Ñ y tildes)
 
-    for palabras, bandera, alterno in REGLAS_SORTEOS:
+    for palabras, bandera_regla, alterno in REGLAS_SORTEOS:
 
         if any(p in clave for p in palabras):
 
-            texto = alterno if alterno else clave
-            return f"{texto}{bandera}"
+            if alterno:
+                return f"{alterno}{bandera_regla}"
 
-    return f"{clave}{BANDERA_POR_DEFECTO}"
+            return f"{visible}{bandera or bandera_regla}"
+
+    return f"{visible}{bandera or BANDERA_POR_DEFECTO}"
 
 
 def numero_a_emoji(numero):
@@ -362,7 +384,9 @@ def formatear_mensaje(resultados):
         numeros = "".join(numero_a_emoji(n) for n in r["numeros"])
 
         # Los asteriscos ponen el nombre en negrita en WhatsApp
-        lineas.append(f"*{nombre_con_bandera(r['nombre'])}*")
+        lineas.append(
+            f"*{nombre_con_bandera(r['nombre'], r.get('bandera'))}*"
+        )
         lineas.append(numeros)
         lineas.append("")
 
@@ -438,42 +462,352 @@ def guardar_estado(estado):
         json.dump(estado, f, ensure_ascii=False, indent=2)
 
 
+# ======================================================
+# Lectura de canales de WhatsApp (origen)
+# ======================================================
+
+PATRON_BANDERA = re.compile(r"[\U0001F1E6-\U0001F1FF]{2}")
+PATRON_DIGITO = re.compile(r"(\d)\ufe0f?\u20e3")
+PATRON_HORA = re.compile(r"RESULTADOS\s*\*?\s*(\d{1,2}:\d{2}\s*[AaPp][Mm])")
+
+
+def leer_canal(canal_id):
+    """
+    Devuelve los últimos mensajes de un canal de WhatsApp.
+    """
+
+    token = os.environ.get("WHAPI_TOKEN")
+
+    if not token:
+        return []
+
+    try:
+        response = requests.get(
+            f"https://gate.whapi.cloud/newsletters/{canal_id}/messages",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"count": MENSAJES_POR_CANAL},
+            timeout=20,
+        )
+
+        response.raise_for_status()
+
+        return response.json().get("messages", [])
+
+    except (requests.RequestException, ValueError) as error:
+        print(f"Error al leer el canal {canal_id}: {error}")
+        return []
+
+
+def es_de_hoy(mensaje):
+    """
+    True si el mensaje se publicó hoy (hora de Costa Rica).
+    """
+
+    marca = mensaje.get("timestamp")
+
+    if not marca:
+        return False
+
+    fecha = datetime.fromtimestamp(marca, TZ_CR).date()
+
+    return fecha == datetime.now(TZ_CR).date()
+
+
+def limpiar_numero_linea(texto):
+    """
+    Quita emojis de número, banderas y símbolos de formato
+    para quedarse solo con el texto (el nombre del sorteo).
+    """
+
+    limpio = PATRON_DIGITO.sub("", texto)
+    limpio = PATRON_BANDERA.sub("", limpio)
+
+    for simbolo in ("🔴", "⚪", "\ufe0f", "*", "#"):
+        limpio = limpio.replace(simbolo, "")
+
+    return limpio.strip()
+
+
+def parsear_formato_numeral(cuerpo):
+    """
+    Formato del canal RESULTADOS - INFO & MAS:
+
+        🇨🇷 *TICA TARDE #* 3️⃣3️⃣
+
+        *BOLITA* 🔴
+
+        *RESULTADOS 4:30 PM*
+    """
+
+    linea = next((l for l in cuerpo.splitlines() if "#" in l), None)
+
+    if not linea:
+        return []
+
+    izquierda, derecha = linea.split("#", 1)
+
+    banderas = PATRON_BANDERA.findall(izquierda)
+    bandera = banderas[0] if banderas else ""
+
+    if bandera == "🇺🇲":
+        bandera = "🇺🇸"
+
+    nombre = limpiar_numero_linea(izquierda)
+    digitos = "".join(PATRON_DIGITO.findall(derecha))
+
+    if not nombre or not digitos:
+        return []
+
+    numeros = [digitos]
+
+    # 🔴 = bola roja (BR), ⚪ = bola blanca (BB)
+    if "🔴" in cuerpo:
+        numeros.append("BR")
+
+    if "⚪" in cuerpo:
+        numeros.append("BB")
+
+    coincidencia = PATRON_HORA.search(cuerpo)
+    hora = coincidencia.group(1).upper() if coincidencia else ""
+
+    return [{
+        "nombre": nombre,
+        "numeros": numeros,
+        "bandera": bandera,
+        "hora": hora,
+    }]
+
+
+def parsear_formato_libre(cuerpo):
+    """
+    Formatos del canal GRUPO MYS. Un mismo mensaje puede traer
+    varios sorteos, con el número en la misma línea o en la siguiente:
+
+        NICA 11AM 1️⃣7️⃣
+        FECHA 7️⃣ NOVIEMBRE
+        TRIPLETA 7️⃣0️⃣7️⃣
+
+        Digital Día 🇨🇷
+        3️⃣5️⃣⚪️
+
+        King Lottery
+        1️⃣3️⃣
+    """
+
+    resultados = []
+    pendiente = None  # (nombre, bandera) esperando su número
+
+    for linea in cuerpo.splitlines():
+
+        texto = linea.strip()
+
+        if not texto:
+            continue
+
+        # La línea "FECHA 7 NOVIEMBRE" no es un resultado
+        if normalizar(texto).startswith("FECHA"):
+            pendiente = None
+            continue
+
+        digitos = "".join(PATRON_DIGITO.findall(texto))
+
+        banderas = PATRON_BANDERA.findall(texto)
+        bandera = banderas[0] if banderas else ""
+
+        if bandera == "🇺🇲":
+            bandera = "🇺🇸"
+
+        nombre = limpiar_numero_linea(texto)
+
+        if not digitos:
+            # Línea con solo el nombre: el número viene después
+            pendiente = (nombre, bandera) if nombre else None
+            continue
+
+        if not nombre:
+            if not pendiente:
+                continue
+
+            nombre, bandera_pendiente = pendiente
+            bandera = bandera or bandera_pendiente
+
+        pendiente = None
+
+        numeros = [digitos]
+
+        if "🔴" in texto:
+            numeros.append("BR")
+
+        if "⚪" in texto:
+            numeros.append("BB")
+
+        resultados.append({
+            "nombre": nombre,
+            "numeros": numeros,
+            "bandera": bandera,
+            "hora": "",
+        })
+
+    return resultados
+
+
+def parsear_mensaje_canal(mensaje):
+    """
+    Devuelve la lista de sorteos que trae un mensaje de canal
+    (vacía si es una imagen, un aviso u otro texto sin resultados).
+    """
+
+    if mensaje.get("type") != "text":
+        return []
+
+    cuerpo = mensaje.get("text", {}).get("body", "")
+
+    if "#" in cuerpo:
+        return parsear_formato_numeral(cuerpo)
+
+    return parsear_formato_libre(cuerpo)
+
+
+# Palabras que no identifican al sorteo (horarios, artículos)
+PALABRAS_COMUNES = {
+    "LA", "EL", "LOS", "LAS", "DE", "DEL", "DIA", "TARDE", "NOCHE",
+    "MANANA", "MD", "MEDIODIA", "AM", "PM", "P", "M", "A",
+}
+
+# Nombres distintos para un mismo sorteo
+ALIAS_SORTEOS = {
+    "TICA": "DIGITAL",
+    "TICAS": "DIGITAL",
+}
+
+
+def firma_sorteo(nombre):
+    """
+    Palabras que identifican un sorteo, sin horarios ni artículos.
+    "Primera Noche" -> {"PRIMERA"}   "LA PRIMERA" -> {"PRIMERA"}
+    """
+
+    limpio = re.sub(r"[^A-Z0-9 ]", " ", normalizar(nombre))
+    palabras = set()
+
+    for palabra in limpio.split():
+
+        # Descartar horas: 3PM, 11AM, 6, 4
+        if re.fullmatch(r"\d+(AM|PM)?", palabra):
+            continue
+
+        if palabra in PALABRAS_COMUNES:
+            continue
+
+        palabras.add(ALIAS_SORTEOS.get(palabra, palabra))
+
+    return palabras
+
+
+def ya_publicado(estado, hoy, nombre, valor):
+    """
+    True si hoy ya se publicó el mismo sorteo con los mismos números,
+    aunque venga de otra fuente (página web o canal) y el nombre
+    esté escrito distinto ("Primera Noche" y "LA PRIMERA",
+    "KING LOTTERY" y "KING LOTTERY NOCHE").
+    """
+
+    firma = firma_sorteo(nombre)
+    valor_n = valor.replace("-", "")
+
+    for clave, otro_valor in estado.items():
+
+        if not clave.startswith(f"{hoy}|"):
+            continue
+
+        if otro_valor.replace("-", "") != valor_n:
+            continue
+
+        otra_firma = firma_sorteo(clave.split("|")[1])
+
+        if firma & otra_firma:
+            return True
+
+    return False
+
+
 def main():
 
     print()
     print("Consultando resultados...")
     print()
 
-    html = obtener_pagina()
-
-    if html is None:
-        return
-
-    resultados = extraer_resultados(html)
-
-    mostrar_resultados(resultados)
-
-    if not resultados:
-        print("Sin resultados, no se envía nada.")
-        return
-
-    # --------------------------------------------------
-    # Deduplicación: solo enviar sorteos nuevos
-    # o que cambiaron durante el día
-    # --------------------------------------------------
-
     estado = cargar_estado()
     hoy = datetime.now(TZ_CR).strftime("%Y-%m-%d")
 
     nuevos = []
 
-    for r in resultados:
-        clave = f"{hoy}|{r['nombre']}"
-        valor = "-".join(r["numeros"])
+    # --------------------------------------------------
+    # 1) Página web
+    # --------------------------------------------------
 
-        if estado.get(clave) != valor:
+    html = obtener_pagina()
+
+    if html is not None:
+
+        resultados = extraer_resultados(html)
+
+        mostrar_resultados(resultados)
+
+        for r in resultados:
+
+            clave = f"{hoy}|{r['nombre']}"
+            valor = "-".join(r["numeros"])
+
+            if estado.get(clave) == valor:
+                continue
+
+            # Ya publicado desde otra fuente (canal)
+            if clave not in estado and ya_publicado(
+                estado, hoy, r["nombre"], valor
+            ):
+                estado[clave] = valor
+                continue
+
             nuevos.append(r)
             estado[clave] = valor
+
+    # --------------------------------------------------
+    # 2) Canales de WhatsApp
+    # --------------------------------------------------
+
+    ids_procesados = estado.get("__ids__", [])
+    ids_nuevos = []
+
+    for canal in CANALES_ORIGEN:
+
+        for mensaje in leer_canal(canal):
+
+            msg_id = mensaje.get("id")
+
+            if not msg_id or msg_id in ids_procesados:
+                continue
+
+            ids_nuevos.append(msg_id)
+
+            if not es_de_hoy(mensaje):
+                continue
+
+            for r in parsear_mensaje_canal(mensaje):
+
+                clave = f"{hoy}|{r['nombre']}|{r['hora']}"
+                valor = "-".join(r["numeros"])
+
+                if ya_publicado(estado, hoy, r["nombre"], valor):
+                    estado[clave] = valor
+                    continue
+
+                nuevos.append(r)
+                estado[clave] = valor
+
+    # --------------------------------------------------
+    # 3) Publicar lo nuevo
+    # --------------------------------------------------
 
     if not nuevos:
         print("No hay resultados nuevos.")
@@ -482,12 +816,13 @@ def main():
     if enviar_whatsapp(formatear_mensaje(nuevos)):
 
         # Solo se guarda el estado si el envío fue exitoso.
-        # Además se limpian días anteriores para que
-        # el archivo no crezca.
+        # Se limpian días anteriores y se limita la lista de IDs.
         estado = {
             k: v for k, v in estado.items()
             if k.startswith(hoy)
         }
+
+        estado["__ids__"] = (ids_procesados + ids_nuevos)[-300:]
 
         guardar_estado(estado)
 
