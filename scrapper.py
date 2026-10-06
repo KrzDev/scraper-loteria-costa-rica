@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import time
 import unicodedata
 from datetime import datetime, timezone, timedelta
 
@@ -29,6 +30,10 @@ MENSAJES_POR_CANAL = 20
 # Evita publicar sorteos viejos que ya estaban en el canal.
 # (debe ser mayor que el intervalo del cron job + posibles retrasos)
 MINUTOS_MAXIMOS = 45
+
+# Segundos de espera cuando sale la Tica pero aún no los Monazos,
+# para publicarlos juntos.
+ESPERA_MONAZO_SEG = 180
 
 # Costa Rica es UTC-6 (sin horario de verano)
 TZ_CR = timezone(timedelta(hours=-6))
@@ -267,20 +272,8 @@ def mostrar_resultados(resultados):
 # WhatsApp (Whapi.Cloud)
 # ======================================================
 
-DIAS = [
-    "Lunes", "Martes", "Miércoles", "Jueves",
-    "Viernes", "Sábado", "Domingo",
-]
-
-MESES = [
-    "enero", "febrero", "marzo", "abril", "mayo", "junio",
-    "julio", "agosto", "setiembre", "octubre", "noviembre", "diciembre",
-]
-
-SEPARADOR = "━━━━━━━━━━━━━━━"
-
 # --------------------------------------------------
-# Banderas y nombres especiales
+# Sorteos permitidos, banderas y nombres especiales
 # --------------------------------------------------
 # Se evalúa en orden: la primera regla que coincida gana.
 # Formato: (palabras_clave, bandera, nombre_alterno)
@@ -289,22 +282,21 @@ SEPARADOR = "━━━━━━━━━━━━━━━"
 #   - bandera: emoji que se agrega al final del nombre.
 #   - nombre_alterno: si no es None, reemplaza el nombre completo.
 #
-# Si ningún sorteo coincide con una regla, NO se agrega bandera
-# (BANDERA_POR_DEFECTO vacío).
+# Todo sorteo que NO coincida con alguna regla se descarta
+# (no se publica).
 
 BANDERA_POR_DEFECTO = ""
 
 REGLAS_SORTEOS = [
-    (("MONAZO",), "", "🐒🐒🐒"),
+    (("MONAZO",), "🇨🇷", "🐒🐒🐒"),
+    (("TICA", "TICAS", "DIGITAL"), "🇨🇷", None),
     (("NICA", "TRIPLETA"), "🇳🇮", None),
     (("HONDURAS",), "🇭🇳", None),
-    (("SALVADOR",), "🇸🇻", None),
-    (("PANAMA",), "🇵🇦", None),
-    (("DOMI", "PRIMERA", "SUERTE", "REAL", "LEIDSA", "LOTEKA"), "🇩🇴", None),
+    (("SALVADOR", "SALVADOREÑA", "SALVADORENA"), "🇸🇻", None),
+    (("PANAMA", "PANA"), "🇵🇦", None),
+    (("DOMI", "PRIMERA", "LOTEKA"), "🇩🇴", None),
     (("ANGUILA",), "🇦🇮", None),
     (("NEW YORK", "FLORIDA", "KING"), "🇺🇸", None),
-    (("PAPA CALIENTE", "DIGITAL", "TICAS", "REVENTADO",
-      "TIEMPOS", "NACIONAL", "POPULAR"), "🇨🇷", None),
 ]
 
 # Resultados especiales de los Tiempos
@@ -323,6 +315,36 @@ def normalizar(texto):
     texto = "".join(c for c in texto if unicodedata.category(c) != "Mn")
 
     return texto.upper().strip()
+
+
+def es_permitido(nombre):
+    """
+    True solo si el sorteo coincide con alguna regla.
+    Las palabras cortas (TICA, NICA, PANA) se comparan como
+    palabra completa para evitar falsos positivos.
+    """
+
+    clave = normalizar(nombre)
+    palabras = set(re.sub(r"[^A-Z0-9 ]", " ", clave).split())
+
+    for claves, _, _ in REGLAS_SORTEOS:
+        for p in claves:
+            if len(p) <= 5:
+                if p in palabras:
+                    return True
+            elif p in clave:
+                return True
+
+    return False
+
+
+def es_tica(nombre):
+    palabras = set(re.sub(r"[^A-Z0-9 ]", " ", normalizar(nombre)).split())
+    return bool(palabras & {"TICA", "TICAS", "DIGITAL"})
+
+
+def es_monazo(nombre):
+    return "MONAZO" in normalizar(nombre)
 
 
 def nombre_con_bandera(nombre, bandera=None):
@@ -369,37 +391,27 @@ def numero_a_emoji(numero):
 
 def formatear_mensaje(resultados):
     """
-    Arma el texto que se publica en el canal / grupo.
+    Arma el texto: solo nombre con bandera + primer número.
+    Tica y Monazos quedan juntos al principio.
     """
 
-    ahora = datetime.now(TZ_CR)
+    resultados = sorted(
+        resultados,
+        key=lambda r: 0 if (es_tica(r["nombre"]) or es_monazo(r["nombre"])) else 1
+    )
 
-    dia = DIAS[ahora.weekday()]
-    mes = MESES[ahora.month - 1]
-    hora = ahora.strftime("%I:%M %p")
-
-    lineas = [
-        "🎰 *RESULTADOS DE LOTERÍAS* 🇨🇷",
-        f"📅 {dia} {ahora.day} de {mes} de {ahora.year}",
-        f"🕐 {hora}",
-        SEPARADOR,
-        "",
-    ]
+    lineas = []
 
     for r in resultados:
-
-        numeros = "".join(numero_a_emoji(n) for n in r["numeros"])
 
         # Los asteriscos ponen el nombre en negrita en WhatsApp
         lineas.append(
             f"*{nombre_con_bandera(r['nombre'], r.get('bandera'))}*"
         )
-        lineas.append(numeros)
+        lineas.append(numero_a_emoji(r["numeros"][0]))  # solo el primero
         lineas.append("")
 
-    lineas.append(SEPARADOR)
-
-    return "\n".join(lineas)
+    return "\n".join(lineas).strip()
 
 
 def enviar_whatsapp(mensaje):
@@ -758,6 +770,43 @@ def guardar_todo(estado, hoy, ids_procesados, ids_nuevos):
     guardar_estado(estado)
 
 
+def procesar_web(estado, hoy, nuevos):
+    """
+    Lee la página, filtra solo los sorteos permitidos y agrega
+    a "nuevos" los que aún no se han publicado.
+    """
+
+    html = obtener_pagina()
+
+    if html is None:
+        return
+
+    resultados = extraer_resultados(html)
+
+    mostrar_resultados(resultados)
+
+    for r in resultados:
+
+        if not es_permitido(r["nombre"]):
+            continue
+
+        clave = f"{hoy}|{r['nombre']}"
+        valor = "-".join(r["numeros"])
+
+        if estado.get(clave) == valor:
+            continue
+
+        # Ya publicado desde otra fuente (canal)
+        if clave not in estado and ya_publicado(
+            estado, hoy, r["nombre"], valor
+        ):
+            estado[clave] = valor
+            continue
+
+        nuevos.append(r)
+        estado[clave] = valor
+
+
 def main():
 
     print()
@@ -773,31 +822,17 @@ def main():
     # 1) Página web
     # --------------------------------------------------
 
-    html = obtener_pagina()
+    procesar_web(estado, hoy, nuevos)
 
-    if html is not None:
+    # Si salió la Tica pero aún no los Monazos, esperar un poco
+    # y volver a consultar para publicarlos juntos.
+    hay_tica = any(es_tica(r["nombre"]) for r in nuevos)
+    hay_monazo = any(es_monazo(r["nombre"]) for r in nuevos)
 
-        resultados = extraer_resultados(html)
-
-        mostrar_resultados(resultados)
-
-        for r in resultados:
-
-            clave = f"{hoy}|{r['nombre']}"
-            valor = "-".join(r["numeros"])
-
-            if estado.get(clave) == valor:
-                continue
-
-            # Ya publicado desde otra fuente (canal)
-            if clave not in estado and ya_publicado(
-                estado, hoy, r["nombre"], valor
-            ):
-                estado[clave] = valor
-                continue
-
-            nuevos.append(r)
-            estado[clave] = valor
+    if hay_tica and not hay_monazo:
+        print(f"Esperando {ESPERA_MONAZO_SEG}s por los Monazos...")
+        time.sleep(ESPERA_MONAZO_SEG)
+        procesar_web(estado, hoy, nuevos)
 
     # --------------------------------------------------
     # 2) Canales de WhatsApp
@@ -821,6 +856,9 @@ def main():
                 continue
 
             for r in parsear_mensaje_canal(mensaje):
+
+                if not es_permitido(r["nombre"]):
+                    continue
 
                 clave = f"{hoy}|{r['nombre']}|{r['hora']}"
                 valor = "-".join(r["numeros"])
