@@ -243,9 +243,9 @@ def extraer_resultados(html):
 def mostrar_resultados(resultados):
 
     print()
-    #print("=" * 50)
-    #print("RESULTADOS DE LOTERÍAS")
-    #print("=" * 50)
+    print("=" * 50)
+    print("RESULTADOS DE LOTERÍAS")
+    print("=" * 50)
     print()
 
     if not resultados:
@@ -790,16 +790,15 @@ def procesar_web(estado, hoy, nuevos):
         if not es_permitido(r["nombre"]):
             continue
 
-        clave = f"{hoy}|{r['nombre']}"
         valor = "-".join(r["numeros"])
+        clave = f"{hoy}|{r['nombre']}|{valor}"
 
-        if estado.get(clave) == valor:
+        # Mismo sorteo con el mismo número: ya se publicó
+        if clave in estado:
             continue
 
         # Ya publicado desde otra fuente (canal)
-        if clave not in estado and ya_publicado(
-            estado, hoy, r["nombre"], valor
-        ):
+        if ya_publicado(estado, hoy, r["nombre"], valor):
             estado[clave] = valor
             continue
 
