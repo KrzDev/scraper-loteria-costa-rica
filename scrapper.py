@@ -16,7 +16,7 @@ ARCHIVO_ESTADO = "ultimo_envio.json"
 # Canales de WhatsApp de los que se leen resultados.
 # (el número conectado a Whapi debe seguir estos canales)
 CANALES_ORIGEN = [
-    "120363401872583659@newsletter",  # RESULTADOS - INFO & MAS
+    
     "120363428516815284@newsletter",  # GRUPO MYS
 ]
 
