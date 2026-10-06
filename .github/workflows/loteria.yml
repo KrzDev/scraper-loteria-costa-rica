@@ -3,11 +3,6 @@ name: Scraper de Lotería
 on:
   # Disparado por el cron job externo (API de GitHub) o manualmente
   workflow_dispatch:
-    inputs:
-      solo_registrar:
-        description: "Registrar los resultados actuales SIN publicar (úsalo la primera vez)"
-        type: boolean
-        default: false
 
   # Respaldo opcional: descomenta si quieres que GitHub también lo ejecute.
   # (Cron en UTC: 18-23,0-3 = 12:00 a 21:59 hora Costa Rica.
@@ -45,7 +40,6 @@ jobs:
         env:
           WHAPI_TOKEN: ${{ secrets.WHAPI_TOKEN }}
           WHAPI_CHANNEL_ID: ${{ secrets.WHAPI_CHANNEL_ID }}
-          SOLO_REGISTRAR: ${{ inputs.solo_registrar }}
         run: python scrapper.py
 
       - name: Guardar estado
