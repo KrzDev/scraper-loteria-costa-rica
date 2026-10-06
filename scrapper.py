@@ -243,9 +243,9 @@ def extraer_resultados(html):
 def mostrar_resultados(resultados):
 
     print()
-    print("=" * 50)
-    print("RESULTADOS DE LOTERÍAS")
-    print("=" * 50)
+    #print("=" * 50)
+    #print("RESULTADOS DE LOTERÍAS")
+    #print("=" * 50)
     print()
 
     if not resultados:
