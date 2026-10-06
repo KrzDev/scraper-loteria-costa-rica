@@ -8,9 +8,11 @@ __pycache__/
 
 # Archivos de prueba locales
 .github/workflows/loteria1.yml
+.github/workflows/loteria2.yml
 pruebaConexion.py
 scrapper1.py
 scrapper2.py
+scrapper3.py
 script.py
 script2.py
 script3.py

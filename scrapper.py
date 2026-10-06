@@ -23,6 +23,11 @@ CANALES_ORIGEN = [
 # Cuántos mensajes recientes se piden a cada canal
 MENSAJES_POR_CANAL = 20
 
+# Solo se publican mensajes de canal de los últimos X minutos.
+# Evita publicar sorteos viejos que ya estaban en el canal.
+# (debe ser mayor que el intervalo del cron job + posibles retrasos)
+MINUTOS_MAXIMOS = 45
+
 # Costa Rica es UTC-6 (sin horario de verano)
 TZ_CR = timezone(timedelta(hours=-6))
 
@@ -498,9 +503,10 @@ def leer_canal(canal_id):
         return []
 
 
-def es_de_hoy(mensaje):
+def es_reciente(mensaje):
     """
-    True si el mensaje se publicó hoy (hora de Costa Rica).
+    True si el mensaje se publicó hace menos de MINUTOS_MAXIMOS
+    y es del día de hoy (hora de Costa Rica).
     """
 
     marca = mensaje.get("timestamp")
@@ -508,9 +514,13 @@ def es_de_hoy(mensaje):
     if not marca:
         return False
 
-    fecha = datetime.fromtimestamp(marca, TZ_CR).date()
+    publicado = datetime.fromtimestamp(marca, TZ_CR)
+    ahora = datetime.now(TZ_CR)
 
-    return fecha == datetime.now(TZ_CR).date()
+    if publicado.date() != ahora.date():
+        return False
+
+    return (ahora - publicado) <= timedelta(minutes=MINUTOS_MAXIMOS)
 
 
 def limpiar_numero_linea(texto):
@@ -731,6 +741,21 @@ def ya_publicado(estado, hoy, nombre, valor):
     return False
 
 
+def guardar_todo(estado, hoy, ids_procesados, ids_nuevos):
+    """
+    Guarda el estado: limpia días anteriores y limita la lista de IDs.
+    """
+
+    estado = {
+        k: v for k, v in estado.items()
+        if k.startswith(hoy)
+    }
+
+    estado["__ids__"] = (ids_procesados + ids_nuevos)[-300:]
+
+    guardar_estado(estado)
+
+
 def main():
 
     print()
@@ -790,7 +815,7 @@ def main():
 
             ids_nuevos.append(msg_id)
 
-            if not es_de_hoy(mensaje):
+            if not es_reciente(mensaje):
                 continue
 
             for r in parsear_mensaje_canal(mensaje):
@@ -813,18 +838,25 @@ def main():
         print("No hay resultados nuevos.")
         return
 
+    # Modo "solo registrar": marca todo lo que hay ahora como ya
+    # publicado, SIN enviar nada. Úsalo la primera vez del día
+    # (o al empezar) para no publicar sorteos viejos.
+    solo_registrar = os.environ.get(
+        "SOLO_REGISTRAR", ""
+    ).strip().lower() in ("1", "true", "si", "sí")
+
+    if solo_registrar:
+        print(
+            f"Modo solo registrar: {len(nuevos)} resultado(s) "
+            "marcados como publicados, sin enviar."
+        )
+        guardar_todo(estado, hoy, ids_procesados, ids_nuevos)
+        return
+
     if enviar_whatsapp(formatear_mensaje(nuevos)):
 
         # Solo se guarda el estado si el envío fue exitoso.
-        # Se limpian días anteriores y se limita la lista de IDs.
-        estado = {
-            k: v for k, v in estado.items()
-            if k.startswith(hoy)
-        }
-
-        estado["__ids__"] = (ids_procesados + ids_nuevos)[-300:]
-
-        guardar_estado(estado)
+        guardar_todo(estado, hoy, ids_procesados, ids_nuevos)
 
 
 if __name__ == "__main__":
