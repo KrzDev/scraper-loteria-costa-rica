@@ -292,10 +292,10 @@ REGLAS_SORTEOS = [
     (("TICA", "TICAS", "DIGITAL"), "🇨🇷", None),
     (("NICA", "TRIPLETA"), "🇳🇮", None),
     (("HONDURAS",), "🇭🇳", None),
-    (("SALVADOR", "SALVADOREÑA", "SALVADORENA"), "🇸🇻", None),
+    (("SALVADOR", "SALVADOREÑA", "SALVADORENA", "El SALVADOR"), "🇸🇻", None),
     (("PANAMA", "PANA"), "🇵🇦", None),
     (("DOMI", "PRIMERA", "LOTEKA"), "🇩🇴", None),
-    (("ANGUILA",), "🇦🇮", None),
+    (("ANGUILA",), "🇩🇴", None),
     (("NEW YORK", "FLORIDA", "KING"), "🇺🇸", None),
 ]
 
@@ -389,7 +389,7 @@ def numero_a_emoji(numero):
     )
 
 
-def formatear_mensaje(resultados):
+'''def formatear_mensaje(resultados):
     """
     Arma el texto: solo nombre con bandera + primer número.
     Tica y Monazos quedan juntos al principio.
@@ -411,7 +411,45 @@ def formatear_mensaje(resultados):
         lineas.append(numero_a_emoji(r["numeros"][0]))  # solo el primero
         lineas.append("")
 
-    return "\n".join(lineas).strip()
+    return "\n".join(lineas).strip()'''
+    
+    
+def formatear_mensaje(resultados):
+    """
+    Arma el texto: solo nombre con bandera + primer número
+    (más la bola roja/blanca si la trae).
+    Tica y Monazos quedan juntos al principio.
+    """
+
+    resultados = sorted(
+        resultados,
+        key=lambda r: 0 if (es_tica(r["nombre"]) or es_monazo(r["nombre"])) else 1
+    )
+
+    lineas = []
+
+    for r in resultados:
+
+        # Los asteriscos ponen el nombre en negrita en WhatsApp
+        lineas.append(
+            f"*{nombre_con_bandera(r['nombre'], r.get('bandera'))}*"
+        )
+
+        # Solo el primer número, más la bola roja/blanca si la trae
+        principal = next(
+            (n for n in r["numeros"] if n.upper() not in EMOJIS_ESPECIALES),
+            r["numeros"][0],
+        )
+        especiales = [
+            n for n in r["numeros"] if n.upper() in EMOJIS_ESPECIALES
+        ]
+
+        lineas.append(
+            "".join(numero_a_emoji(n) for n in [principal] + especiales)
+        )
+        lineas.append("")
+
+    return "\n".join(lineas).strip()    
 
 
 def enviar_whatsapp(mensaje):
